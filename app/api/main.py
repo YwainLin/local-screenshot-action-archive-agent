@@ -3,7 +3,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .api.scans import router as scans_router
+from .scans import router as scans_router
+from .search import router as search_router
 
 app = FastAPI(
     title="本地截图行动归档 Agent",
@@ -12,6 +13,7 @@ app = FastAPI(
 )
 
 app.include_router(scans_router)
+app.include_router(search_router)
 
 app.mount("/static", StaticFiles(directory="app/templates"), name="static")
 
