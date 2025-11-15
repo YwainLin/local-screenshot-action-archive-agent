@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/
+
+# SQLite databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Thumbnails and exports
+thumbnails/
+exports/
+
+# Workspace data (user-specific)
+workspace/
+
+# Logs
+*.log
+logs/
+
+# Model caches
+models/
+.cache/
+huggingface/
+transformers/
+
+# Audit files
+audit/
+
+# Export files
+*.json
+!pyproject.toml
+!package.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Markdown exports (contain real data)
+exports/**/*.md
+exports/**/*.json
+
+# Config with sensitive paths
+config.json

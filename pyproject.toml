@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-screenshot-action-archive-agent"
+version = "0.1.0"
+description = "一个默认离线运行的桌面文件整理 Agent，通过图像去重、OCR 和规则提取，将截图整理为可检索信息和行动建议"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "sqlalchemy>=2.0.23",
+    "aiosqlite>=0.19.0",
+    "pillow>=10.1.0",
+    "jinja2>=3.1.2",
+    "python-multipart>=0.0.6",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.11.0",
+    "ruff>=0.1.6",
+    "mypy>=1.7.0",
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "pytest-cov>=4.1.0",
+]
+ocr = [
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.5.0",
+]
+graph = [
+    "neo4j>=5.14.0",
+    "neo4j-graphrag>=0.1.0",
+]
+hashing = [
+    "imagehash>=4.3.1",
+]
+langgraph = [
+    "langgraph>=0.0.20",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
