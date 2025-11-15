@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from .scans import router as scans_router
 from .search import router as search_router
 from .proposals import router as proposals_router
+from .audit import router as audit_router
 
 app = FastAPI(
     title="本地截图行动归档 Agent",
@@ -16,6 +17,7 @@ app = FastAPI(
 app.include_router(scans_router)
 app.include_router(search_router)
 app.include_router(proposals_router)
+app.include_router(audit_router)
 
 app.mount("/static", StaticFiles(directory="app/templates"), name="static")
 
