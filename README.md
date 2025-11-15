@@ -148,7 +148,7 @@ local-screenshot-action-archive-agent/
 
 ### LLM 配置
 
-支持两种 LLM 模式：
+支持三种 LLM 模式：
 
 #### 1. Ollama（本地，推荐）
 
@@ -165,12 +165,25 @@ export LLM_BASE_URL=http://localhost:11434
 export LLM_MODEL=qwen2.5-vl:latest
 ```
 
-#### 2. OpenAI 兼容 API
+#### 2. OpenRouter（云端，推荐）
+
+```bash
+# 注册 OpenRouter 获取 API Key
+# https://openrouter.ai
+
+# 设置环境变量
+export LLM_PROVIDER=openai
+export LLM_API_KEY=sk-or-v1-your_openrouter_api_key
+export LLM_BASE_URL=https://openrouter.ai/api/v1
+export LLM_MODEL=qwen/qwen-2.5-72b-instruct
+```
+
+#### 3. OpenAI 官方 API
 
 ```bash
 # 设置环境变量
 export LLM_PROVIDER=openai
-export LLM_API_KEY=your_api_key_here
+export LLM_API_KEY=sk-your_openai_api_key
 export LLM_BASE_URL=https://api.openai.com
 export LLM_MODEL=gpt-4o
 ```

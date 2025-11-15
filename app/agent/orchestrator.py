@@ -1,196 +1,585 @@
-from __future__ import annotations
+"""Agent 编排服务"""
 
-import enum
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+import logging
+import uuid
+from datetime import datetime
+from typing import Optional
 
-from ..services.llm_service import LLMService, get_llm_service
+from app.agent.state import (
+    AgentPhase,
+    AgentState,
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalResponse,
+    NodeResult,
+)
+from app.services.deduplication import DeduplicationService
+from app.services.extractor import ExtractorService
+from app.services.fingerprint import FingerprintService
+from app.services.ocr import OcrService
+from app.services.scan_manager import ScanManager
+from app.services.search import SearchService
+from app.storage.database import DatabaseManager
+from app.storage.models import (
+    ArchiveProposal,
+    Extraction,
+    OcrResult,
+    ProposalAction,
+    ProposalStatus,
+)
 
-
-class AgentState(str, enum.Enum):
-    """Agent 状态"""
-    IDLE = "idle"
-    INVENTORY = "inventory"
-    DEDUPLICATE = "deduplicate"
-    OCR_EXTRACT = "ocr_extract"
-    GRAPH_INDEX = "graph_index"
-    RETRIEVE_AND_PLAN = "retrieve_and_plan"
-    APPROVAL_INTERRUPT = "approval_interrupt"
-    APPLY_COPY = "apply_copy"
-    RECORD_FEEDBACK = "record_feedback"
-    AUDIT = "audit"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-@dataclass
-class WorkflowState:
-    """工作流状态"""
-    workspace_id: str
-    scan_run_id: str
-    asset_ids: List[str] = field(default_factory=list)
-    evidence_refs: List[Dict[str, Any]] = field(default_factory=list)
-    proposal_ids: List[str] = field(default_factory=list)
-    approval_decision: Optional[str] = None
-    audit_refs: List[Dict[str, Any]] = field(default_factory=list)
-    current_state: AgentState = AgentState.IDLE
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
-    """Agent 编排器（简化版 LangGraph 状态图）"""
+    """Agent 编排器
 
-    def __init__(self, llm_service: Optional[LLMService] = None) -> None:
-        self.llm_service = llm_service or get_llm_service()
-        self.state_transitions = {
-            AgentState.IDLE: AgentState.INVENTORY,
-            AgentState.INVENTORY: AgentState.DEDUPLICATE,
-            AgentState.DEDUPLICATE: AgentState.OCR_EXTRACT,
-            AgentState.OCR_EXTRACT: AgentState.GRAPH_INDEX,
-            AgentState.GRAPH_INDEX: AgentState.RETRIEVE_AND_PLAN,
-            AgentState.RETRIEVE_AND_PLAN: AgentState.APPROVAL_INTERRUPT,
-            AgentState.APPROVAL_INTERRUPT: None,  # 等待用户输入
-            AgentState.APPLY_COPY: AgentState.AUDIT,
-            AgentState.RECORD_FEEDBACK: AgentState.AUDIT,
-            AgentState.AUDIT: AgentState.COMPLETED,
-        }
-        self.state_handlers = {
-            AgentState.INVENTORY: self._handle_inventory,
-            AgentState.DEDUPLICATE: self._handle_deduplicate,
-            AgentState.OCR_EXTRACT: self._handle_ocr_extract,
-            AgentState.GRAPH_INDEX: self._handle_graph_index,
-            AgentState.RETRIEVE_AND_PLAN: self._handle_retrieve_and_plan,
-            AgentState.APPROVAL_INTERRUPT: self._handle_approval_interrupt,
-            AgentState.APPLY_COPY: self._handle_apply_copy,
-            AgentState.RECORD_FEEDBACK: self._handle_record_feedback,
-            AgentState.AUDIT: self._handle_audit,
-        }
+    负责协调各个服务完成截图整理流程。
+    """
 
-    def create_workflow_state(
-        self,
-        workspace_id: str,
-        scan_run_id: str,
-    ) -> WorkflowState:
-        """创建工作流状态"""
-        return WorkflowState(
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+        self.scan_manager = ScanManager(db_manager)
+        self.fingerprint = FingerprintService()
+        self.deduplication = DeduplicationService(self.fingerprint)
+        self.ocr_service = OcrService()
+        self.extractor = ExtractorService()
+        self.search_service = SearchService(db_manager)
+
+    def create_state(self, workspace_id: str, scan_run_id: str) -> AgentState:
+        """创建初始 Agent 状态
+
+        Args:
+            workspace_id: 工作区 ID
+            scan_run_id: 扫描任务 ID
+
+        Returns:
+            初始 AgentState
+        """
+        return AgentState(
             workspace_id=workspace_id,
             scan_run_id=scan_run_id,
+            current_phase=AgentPhase.INVENTORY,
+            started_at=datetime.now(),
         )
 
-    async def execute_step(self, state: WorkflowState) -> WorkflowState:
-        """执行单个工作流步骤"""
-        handler = self.state_handlers.get(state.current_state)
-        if handler:
-            try:
-                state = await handler(state)
-                next_state = self.state_transitions.get(state.current_state)
-                if next_state is not None:
-                    state.current_state = next_state
-                elif state.current_state == AgentState.APPROVAL_INTERRUPT:
-                    pass  # 等待用户输入
-            except Exception as e:
-                state.error = str(e)
-                state.current_state = AgentState.FAILED
+    def run_inventory(self, state: AgentState) -> NodeResult:
+        """执行资产清点阶段
 
-        return state
+        Args:
+            state: 当前 Agent 状态
 
-    async def execute_workflow(self, state: WorkflowState) -> WorkflowState:
-        """执行完整工作流直到中断或完成"""
-        while state.current_state not in (
-            AgentState.COMPLETED,
-            AgentState.FAILED,
-            AgentState.APPROVAL_INTERRUPT,
-        ):
-            state = await self.execute_step(state)
+        Returns:
+            NodeResult
+        """
+        try:
+            if not state.scan_run_id:
+                return NodeResult(
+                    success=False,
+                    error_message="扫描任务 ID 不存在",
+                )
 
-        return state
+            # 获取扫描任务的资产
+            assets = self.scan_manager.get_assets_by_scan(state.scan_run_id)
+            asset_ids = [a.id for a in assets if a.id]
 
-    async def _handle_inventory(self, state: WorkflowState) -> WorkflowState:
-        """处理资产清点阶段"""
-        state.current_state = AgentState.INVENTORY
-        state.metadata["inventory_completed"] = True
-        return state
+            # 更新状态
+            state.asset_ids = asset_ids
+            state.total_files = len(asset_ids)
+            state.current_phase = AgentPhase.DEDUPLICATE
 
-    async def _handle_deduplicate(self, state: WorkflowState) -> WorkflowState:
-        """处理重复检测阶段"""
-        state.current_state = AgentState.DEDUPLICATE
-        state.metadata["deduplication_completed"] = True
-        return state
+            logger.info(f"资产清点完成: {len(asset_ids)} 个文件")
+            return NodeResult(
+                success=True,
+                next_phase=AgentPhase.DEDUPLICATE,
+                data={"asset_count": len(asset_ids)},
+            )
 
-    async def _handle_ocr_extract(self, state: WorkflowState) -> WorkflowState:
-        """处理 OCR 提取阶段"""
-        state.current_state = AgentState.OCR_EXTRACT
-        state.metadata["ocr_completed"] = True
-        return state
+        except Exception as e:
+            logger.error(f"资产清点失败: {e}")
+            return NodeResult(
+                success=False,
+                error_message=str(e),
+            )
 
-    async def _handle_graph_index(self, state: WorkflowState) -> WorkflowState:
-        """处理图索引阶段"""
-        state.current_state = AgentState.GRAPH_INDEX
-        state.metadata["graph_index_completed"] = True
-        return state
+    def run_deduplicate(self, state: AgentState) -> NodeResult:
+        """执行去重阶段
 
-    async def _handle_retrieve_and_plan(self, state: WorkflowState) -> WorkflowState:
-        """处理检索与计划生成阶段（使用 LLM）"""
-        state.current_state = AgentState.RETRIEVE_AND_PLAN
+        Args:
+            state: 当前 Agent 状态
 
-        if self.llm_service.is_available:
-            state.metadata["llm_available"] = True
-            state.metadata["plan_strategy"] = "llm_enhanced"
-        else:
-            state.metadata["llm_available"] = False
-            state.metadata["plan_strategy"] = "rule_based"
+        Returns:
+            NodeResult
+        """
+        try:
+            if not state.scan_run_id:
+                return NodeResult(
+                    success=False,
+                    error_message="扫描任务 ID 不存在",
+                )
 
-        state.metadata["plan_generated"] = True
-        return state
+            # 获取重复组
+            groups = self.scan_manager.get_duplicate_groups(state.scan_run_id)
+            state.duplicate_groups = len(groups)
+            state.current_phase = AgentPhase.OCR_EXTRACT
 
-    async def _handle_approval_interrupt(self, state: WorkflowState) -> WorkflowState:
-        """处理审批中断"""
-        state.current_state = AgentState.APPROVAL_INTERRUPT
-        state.metadata["awaiting_approval"] = True
-        return state
+            logger.info(f"去重完成: {len(groups)} 个重复组")
+            return NodeResult(
+                success=True,
+                next_phase=AgentPhase.OCR_EXTRACT,
+                data={"duplicate_groups": len(groups)},
+            )
 
-    async def _handle_apply_copy(self, state: WorkflowState) -> WorkflowState:
-        """处理复制执行阶段"""
-        state.current_state = AgentState.APPLY_COPY
-        state.metadata["copy_applied"] = True
-        return state
+        except Exception as e:
+            logger.error(f"去重失败: {e}")
+            return NodeResult(
+                success=False,
+                error_message=str(e),
+            )
 
-    async def _handle_record_feedback(self, state: WorkflowState) -> WorkflowState:
-        """处理反馈记录阶段"""
-        state.current_state = AgentState.RECORD_FEEDBACK
-        state.metadata["feedback_recorded"] = True
-        return state
+    def run_ocr_extract(self, state: AgentState) -> NodeResult:
+        """执行 OCR 和实体提取阶段
 
-    async def _handle_audit(self, state: WorkflowState) -> WorkflowState:
-        """处理审计记录阶段"""
-        state.current_state = AgentState.AUDIT
-        state.metadata["audit_recorded"] = True
-        return state
+        Args:
+            state: 当前 Agent 状态
 
-    def analyze_with_llm(self, ocr_text: str, extractions: List[Dict]) -> Dict[str, Any]:
-        """使用 LLM 分析内容"""
-        if not self.llm_service.is_available:
-            return {
-                "title": "",
-                "category": "其他",
-                "summary": "",
-                "sensitivity": {"is_sensitive": False, "sensitivity_level": "low"},
-            }
+        Returns:
+            NodeResult
+        """
+        try:
+            if not state.scan_run_id:
+                return NodeResult(
+                    success=False,
+                    error_message="扫描任务 ID 不存在",
+                )
 
-        title = self.llm_service.generate_title(ocr_text)
-        category = self.llm_service.generate_category(ocr_text, extractions)
-        summary = self.llm_service.generate_summary(ocr_text)
-        sensitivity = self.llm_service.analyze_sensitivity(ocr_text)
+            # 获取资产
+            assets = self.scan_manager.get_assets_by_scan(state.scan_run_id)
+            ocr_completed = 0
 
-        return {
-            "title": title,
-            "category": category,
-            "summary": summary,
-            "sensitivity": sensitivity,
+            for asset in assets:
+                if not asset.id or not asset.path:
+                    continue
+
+                try:
+                    # 执行 OCR
+                    ocr_result = self.ocr_service.run_ocr(asset.path, asset.id)
+
+                    # 保存 OCR 结果
+                    ocr_id = str(uuid.uuid4())
+                    ocr_result.id = ocr_id
+                    self._save_ocr_result(ocr_result)
+
+                    # 提取实体
+                    extractions = self.extractor.extract_from_ocr_result(ocr_result)
+                    for ext in extractions:
+                        ext_id = str(uuid.uuid4())
+                        ext.id = ext_id
+                        self._save_extraction(ext)
+
+                    # 添加到已处理列表
+                    if asset.id not in state.processed_asset_ids:
+                        state.processed_asset_ids.append(asset.id)
+
+                    ocr_completed += 1
+
+                except Exception as e:
+                    logger.warning(f"OCR 失败 {asset.path}: {e}")
+                    continue
+
+            state.ocr_completed = ocr_completed
+            state.current_phase = AgentPhase.GRAPH_INDEX
+
+            logger.info(f"OCR 提取完成: {ocr_completed}/{len(assets)}")
+            return NodeResult(
+                success=True,
+                next_phase=AgentPhase.GRAPH_INDEX,
+                data={"ocr_completed": ocr_completed},
+            )
+
+        except Exception as e:
+            logger.error(f"OCR 提取失败: {e}")
+            return NodeResult(
+                success=False,
+                error_message=str(e),
+            )
+
+    def run_graph_index(self, state: AgentState) -> NodeResult:
+        """执行图索引阶段（Neo4j）
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            NodeResult
+        """
+        # MVP 阶段跳过 Neo4j，直接进入计划生成
+        state.current_phase = AgentPhase.RETRIEVE_AND_PLAN
+        logger.info("图索引阶段跳过（MVP）")
+        return NodeResult(
+            success=True,
+            next_phase=AgentPhase.RETRIEVE_AND_PLAN,
+        )
+
+    def run_retrieve_and_plan(self, state: AgentState) -> NodeResult:
+        """执行检索和计划生成阶段
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            NodeResult
+        """
+        try:
+            if not state.scan_run_id:
+                return NodeResult(
+                    success=False,
+                    error_message="扫描任务 ID 不存在",
+                )
+
+            # 生成归档建议
+            proposals = self._generate_proposals(state)
+            proposal_ids = []
+
+            for proposal in proposals:
+                proposal_id = str(uuid.uuid4())
+                proposal.id = proposal_id
+                self._save_proposal(proposal)
+                proposal_ids.append(proposal_id)
+
+            state.proposal_ids = proposal_ids
+            state.pending_proposal_ids = proposal_ids.copy()
+            state.proposals_generated = len(proposals)
+            state.current_phase = AgentPhase.APPROVAL_INTERRUPT
+
+            logger.info(f"计划生成完成: {len(proposals)} 个建议")
+            return NodeResult(
+                success=True,
+                next_phase=AgentPhase.APPROVAL_INTERRUPT,
+                data={"proposals_count": len(proposals)},
+            )
+
+        except Exception as e:
+            logger.error(f"计划生成失败: {e}")
+            return NodeResult(
+                success=False,
+                error_message=str(e),
+            )
+
+    def run_approval_interrupt(self, state: AgentState) -> NodeResult:
+        """审批中断阶段
+
+        暂停执行，等待用户审批。
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            NodeResult
+        """
+        # 检查是否有待审批的建议
+        if not state.pending_proposal_ids:
+            state.current_phase = AgentPhase.AUDIT
+            return NodeResult(
+                success=True,
+                next_phase=AgentPhase.AUDIT,
+            )
+
+        # 等待用户审批
+        state.approval_decision = ApprovalDecision.PENDING
+        logger.info(f"等待审批: {len(state.pending_proposal_ids)} 个建议")
+        return NodeResult(
+            success=True,
+            next_phase=AgentPhase.APPROVAL_INTERRUPT,
+            data={"pending_count": len(state.pending_proposal_ids)},
+        )
+
+    def process_approval(self, state: AgentState, request: ApprovalRequest) -> ApprovalResponse:
+        """处理审批请求
+
+        Args:
+            state: 当前 Agent 状态
+            request: 审批请求
+
+        Returns:
+            ApprovalResponse
+        """
+        try:
+            if request.proposal_id not in state.pending_proposal_ids:
+                return ApprovalResponse(
+                    proposal_id=request.proposal_id,
+                    decision=request.decision,
+                    applied=False,
+                    error_message="建议不存在或已处理",
+                )
+
+            # 更新建议状态
+            if request.decision == ApprovalDecision.APPROVE:
+                self._update_proposal_status(request.proposal_id, ProposalStatus.APPROVED)
+                state.pending_proposal_ids.remove(request.proposal_id)
+                state.edited_proposals[request.proposal_id] = {"decision": "approved"}
+
+            elif request.decision == ApprovalDecision.REJECT:
+                self._update_proposal_status(
+                    request.proposal_id, ProposalStatus.REJECTED, request.reason
+                )
+                state.pending_proposal_ids.remove(request.proposal_id)
+                state.edited_proposals[request.proposal_id] = {
+                    "decision": "rejected",
+                    "reason": request.reason,
+                }
+
+            elif request.decision == ApprovalDecision.EDIT:
+                if request.edits:
+                    state.edited_proposals[request.proposal_id] = {
+                        "decision": "edited",
+                        "edits": request.edits,
+                    }
+
+            return ApprovalResponse(
+                proposal_id=request.proposal_id,
+                decision=request.decision,
+                applied=True,
+            )
+
+        except Exception as e:
+            logger.error(f"处理审批失败: {e}")
+            return ApprovalResponse(
+                proposal_id=request.proposal_id,
+                decision=request.decision,
+                applied=False,
+                error_message=str(e),
+            )
+
+    def run_apply_copy(self, state: AgentState) -> NodeResult:
+        """执行复制阶段
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            NodeResult
+        """
+        # MVP 阶段只记录操作，不实际复制
+        state.current_phase = AgentPhase.AUDIT
+        logger.info("复制阶段跳过（MVP）")
+        return NodeResult(
+            success=True,
+            next_phase=AgentPhase.AUDIT,
+        )
+
+    def run_audit(self, state: AgentState) -> NodeResult:
+        """执行审计阶段
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            NodeResult
+        """
+        state.completed_at = datetime.now()
+        state.current_phase = AgentPhase.COMPLETED
+
+        logger.info("审计完成")
+        return NodeResult(
+            success=True,
+            next_phase=AgentPhase.COMPLETED,
+        )
+
+    def execute_phase(self, state: AgentState) -> NodeResult:
+        """执行当前阶段
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            NodeResult
+        """
+        phase_handlers = {
+            AgentPhase.INVENTORY: self.run_inventory,
+            AgentPhase.DEDUPLICATE: self.run_deduplicate,
+            AgentPhase.OCR_EXTRACT: self.run_ocr_extract,
+            AgentPhase.GRAPH_INDEX: self.run_graph_index,
+            AgentPhase.RETRIEVE_AND_PLAN: self.run_retrieve_and_plan,
+            AgentPhase.APPROVAL_INTERRUPT: self.run_approval_interrupt,
+            AgentPhase.APPLY_COPY: self.run_apply_copy,
+            AgentPhase.AUDIT: self.run_audit,
         }
 
+        handler = phase_handlers.get(state.current_phase)
+        if not handler:
+            return NodeResult(
+                success=False,
+                error_message=f"未知阶段: {state.current_phase}",
+            )
 
-def get_orchestrator(llm_service: Optional[LLMService] = None) -> AgentOrchestrator:
-    """获取编排器实例"""
-    return AgentOrchestrator(llm_service)
+        return handler(state)
+
+    def run_full_pipeline(self, state: AgentState) -> AgentState:
+        """运行完整流程
+
+        Args:
+            state: 初始 Agent 状态
+
+        Returns:
+            最终 AgentState
+        """
+        max_iterations = 20
+        iteration = 0
+
+        while (
+            state.current_phase not in [AgentPhase.COMPLETED, AgentPhase.FAILED]
+            and iteration < max_iterations
+        ):
+            result = self.execute_phase(state)
+
+            if not result.success:
+                state.current_phase = AgentPhase.FAILED
+                state.error_message = result.error_message
+                break
+
+            # 如果是审批中断阶段，停止执行等待用户输入
+            if state.current_phase == AgentPhase.APPROVAL_INTERRUPT:
+                if state.pending_proposal_ids:
+                    break
+
+            iteration += 1
+
+        return state
+
+    def _generate_proposals(self, state: AgentState) -> list[ArchiveProposal]:
+        """生成归档建议
+
+        Args:
+            state: 当前 Agent 状态
+
+        Returns:
+            ArchiveProposal 列表
+        """
+        proposals = []
+
+        for asset_id in state.asset_ids:
+            # 获取资产的提取实体
+            rows = self.db_manager.fetchall(
+                "SELECT * FROM extraction WHERE asset_id = ?",
+                (asset_id,),
+            )
+
+            if not rows:
+                # 没有提取实体，建议保留
+                proposal = ArchiveProposal(
+                    asset_id=asset_id,
+                    action=ProposalAction.KEEP,
+                    confidence=0.5,
+                    rationale="未提取到关键信息",
+                    requires_approval=False,
+                )
+                proposals.append(proposal)
+                continue
+
+            # 分析提取实体，生成建议
+            has_date = any(r["kind"] == "date" for r in rows)
+            has_amount = any(r["kind"] == "amount" for r in rows)
+            has_action = any(r["kind"] == "action_phrase" for r in rows)
+            has_url = any(r["kind"] == "url" for r in rows)
+
+            # 根据实体类型决定分类
+            if has_amount or has_action:
+                category = "订单与售后"
+                confidence = 0.8
+                rationale = "包含金额或行动词信息"
+            elif has_date:
+                category = "日期相关"
+                confidence = 0.7
+                rationale = "包含日期信息"
+            elif has_url:
+                category = "链接收藏"
+                confidence = 0.6
+                rationale = "包含链接信息"
+            else:
+                category = "其他"
+                confidence = 0.5
+                rationale = "包含其他信息"
+
+            proposal = ArchiveProposal(
+                asset_id=asset_id,
+                action=ProposalAction.COPY_TO_CATEGORY,
+                suggested_category=category,
+                confidence=confidence,
+                rationale=rationale,
+                requires_approval=confidence < 0.7,
+            )
+            proposals.append(proposal)
+
+        return proposals
+
+    def _save_ocr_result(self, result: OcrResult) -> None:
+        """保存 OCR 结果"""
+        self.db_manager.execute(
+            """
+            INSERT INTO ocr_result (id, asset_id, engine, engine_version, language, text, confidence, is_sensitive)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                result.id,
+                result.asset_id,
+                result.engine,
+                result.engine_version,
+                result.language,
+                result.text,
+                result.confidence,
+                1 if result.is_sensitive else 0,
+            ),
+        )
+
+    def _save_extraction(self, extraction: Extraction) -> None:
+        """保存提取实体"""
+        self.db_manager.execute(
+            """
+            INSERT INTO extraction (id, asset_id, ocr_result_id, kind, value, value_masked, evidence_span, confidence, is_sensitive, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                extraction.id,
+                extraction.asset_id,
+                extraction.ocr_result_id,
+                extraction.kind,
+                extraction.value,
+                extraction.value_masked,
+                extraction.evidence_span,
+                extraction.confidence,
+                1 if extraction.is_sensitive else 0,
+                extraction.source,
+            ),
+        )
+
+    def _save_proposal(self, proposal: ArchiveProposal) -> None:
+        """保存归档建议"""
+        self.db_manager.execute(
+            """
+            INSERT INTO archive_proposal (id, asset_id, action, suggested_category, confidence, rationale, requires_approval, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proposal.id,
+                proposal.asset_id,
+                proposal.action.value,
+                proposal.suggested_category,
+                proposal.confidence,
+                proposal.rationale,
+                1 if proposal.requires_approval else 0,
+                proposal.status.value,
+            ),
+        )
+
+    def _update_proposal_status(
+        self,
+        proposal_id: str,
+        status: ProposalStatus,
+        reason: Optional[str] = None,
+    ) -> None:
+        """更新建议状态"""
+        self.db_manager.execute(
+            "UPDATE archive_proposal SET status = ?, rejection_reason = ? WHERE id = ?",
+            (status.value, reason, proposal_id),
+        )

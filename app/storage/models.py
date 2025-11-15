@@ -1,196 +1,164 @@
-from __future__ import annotations
+"""数据模型定义"""
 
-import enum
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
-from sqlalchemy import (
-    Column,
-    DateTime,
-    Enum,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    UniqueConstraint,
-)
-from sqlalchemy.orm import DeclarativeBase, relationship
+from pydantic import BaseModel, Field
 
 
-class Base(DeclarativeBase):
-    """SQLAlchemy 声明式基类"""
-    pass
-
-
-class ScanStatus(str, enum.Enum):
-    """扫描任务状态"""
+class ScanStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
-class DuplicateKind(str, enum.Enum):
-    """重复类型"""
+class DuplicateKind(str, Enum):
     EXACT = "exact"
     NEAR = "near"
 
 
-class ProposalAction(str, enum.Enum):
-    """归档建议动作"""
+class ProposalAction(str, Enum):
+    KEEP = "keep"
+    MARK_PENDING = "mark_pending"
     COPY_TO_CATEGORY = "copy_to_category"
-    KEEP_IN_PLACE = "keep_in_place"
-    MARK_AS_DUPLICATE = "mark_as_duplicate"
-    NEEDS_REVIEW = "needs_review"
+    MERGE_DUPLICATE = "merge_duplicate"
 
 
-class ProposalStatus(str, enum.Enum):
-    """归档建议状态"""
+class ProposalStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
     APPLIED = "applied"
 
 
-class AuditEventType(str, enum.Enum):
-    """审计事件类型"""
+class AuditEventType(str, Enum):
+    COPY = "copy"
+    EXPORT = "export"
+    REJECT = "reject"
+    ERROR = "error"
     PROPOSAL_APPROVED = "proposal_approved"
     PROPOSAL_REJECTED = "proposal_rejected"
     FILE_COPIED = "file_copied"
     COPY_FAILED = "copy_failed"
 
 
-class ScanRun(Base):
-    """扫描任务记录"""
-    __tablename__ = "scan_run"
+class WorkspaceConfig(BaseModel):
+    """工作区配置模型"""
 
-    id = Column(String(36), primary_key=True)
-    root_path = Column(Text, nullable=False)
-    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    completed_at = Column(DateTime, nullable=True)
-    status = Column(Enum(ScanStatus), default=ScanStatus.PENDING, nullable=False)
-    total_files = Column(Integer, default=0)
-    error_count = Column(Integer, default=0)
-    error_list = Column(Text, default="[]")
-
-    assets = relationship("Asset", back_populates="scan_run")
-
-
-class Asset(Base):
-    """图片资产索引"""
-    __tablename__ = "asset"
-
-    id = Column(String(36), primary_key=True)
-    scan_run_id = Column(String(36), ForeignKey("scan_run.id"), nullable=False)
-    path = Column(Text, nullable=False)
-    filename = Column(String(255), nullable=False)
-    extension = Column(String(10), nullable=False)
-    sha256 = Column(String(64), nullable=False)
-    phash = Column(String(16), nullable=True)
-    size = Column(Integer, nullable=False)
-    mtime = Column(DateTime, nullable=False)
-    width = Column(Integer, nullable=True)
-    height = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    scan_run = relationship("ScanRun", back_populates="assets")
-    ocr_results = relationship("OcrResult", back_populates="asset")
-    extractions = relationship("Extraction", back_populates="asset")
-    proposals = relationship("ArchiveProposal", back_populates="asset")
-
-
-class DuplicateGroup(Base):
-    """重复组"""
-    __tablename__ = "duplicate_group"
-
-    id = Column(String(36), primary_key=True)
-    kind = Column(Enum(DuplicateKind), nullable=False)
-    representative_asset_id = Column(
-        String(36), ForeignKey("asset.id"), nullable=False
+    workspace_id: str = Field(..., description="工作区唯一标识")
+    root_path: str = Field(..., description="用户选择的截图目录（白名单根目录）")
+    allowed_export_paths: list[str] = Field(
+        default_factory=list, description="允许导出的目标目录列表"
     )
-    distance = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    representative = relationship("Asset", foreign_keys=[representative_asset_id])
-
-
-class OcrResult(Base):
-    """OCR 识别结果"""
-    __tablename__ = "ocr_result"
-
-    id = Column(String(36), primary_key=True)
-    asset_id = Column(String(36), ForeignKey("asset.id"), nullable=False)
-    engine = Column(String(50), nullable=False)
-    engine_version = Column(String(50), nullable=True)
-    language = Column(String(20), nullable=False)
-    text = Column(Text, nullable=False)
-    confidence = Column(Float, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    asset = relationship("Asset", back_populates="ocr_results")
+    thumbnail_max_size: int = Field(default=256, description="缩略图最大尺寸（像素）")
+    phash_threshold: int = Field(default=10, description="近似重复 pHash 距离阈值")
+    ocr_language: str = Field(default="ch", description="OCR 默认语言")
+    enable_local_model: bool = Field(default=False, description="是否启用本地视觉模型")
 
 
-class Extraction(Base):
-    """规则提取结果"""
-    __tablename__ = "extraction"
+class ScanRun(BaseModel):
+    """扫描任务模型"""
 
-    id = Column(String(36), primary_key=True)
-    asset_id = Column(String(36), ForeignKey("asset.id"), nullable=False)
-    kind = Column(String(50), nullable=False)
-    value_raw = Column(Text, nullable=False)
-    value_masked = Column(Text, nullable=False)
-    evidence_span = Column(Text, nullable=True)
-    confidence = Column(Float, nullable=False)
-    is_sensitive = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    asset = relationship("Asset", back_populates="extractions")
+    id: Optional[str] = Field(None, description="任务 ID")
+    workspace_id: Optional[str] = Field(None, description="所属工作区 ID")
+    root_path: str = Field(..., description="扫描目录路径")
+    status: ScanStatus = Field(default=ScanStatus.PENDING, description="任务状态")
+    started_at: Optional[datetime] = Field(None, description="开始时间")
+    completed_at: Optional[datetime] = Field(None, description="完成时间")
+    total_files: int = Field(default=0, description="总文件数")
+    scanned_files: int = Field(default=0, description="已扫描文件数")
+    error_count: int = Field(default=0, description="错误数")
+    error_messages: list[str] = Field(default_factory=list, description="错误信息列表")
 
 
-class ArchiveProposal(Base):
-    """归档建议"""
-    __tablename__ = "archive_proposal"
+class Asset(BaseModel):
+    """图片资产模型"""
 
-    id = Column(String(36), primary_key=True)
-    asset_id = Column(String(36), ForeignKey("asset.id"), nullable=False)
-    action = Column(Enum(ProposalAction), nullable=False)
-    target_category = Column(String(100), nullable=True)
-    target_path = Column(Text, nullable=True)
-    rationale = Column(Text, nullable=False)
-    confidence = Column(Float, nullable=False)
-    status = Column(Enum(ProposalStatus), default=ProposalStatus.PENDING, nullable=False)
-    evidence_refs = Column(Text, default="[]")
-    rejection_reason = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    asset = relationship("Asset", back_populates="proposals")
+    id: Optional[str] = Field(None, description="资产 ID")
+    scan_run_id: str = Field(..., description="所属扫描任务 ID")
+    path: str = Field(..., description="文件绝对路径")
+    filename: str = Field(..., description="文件名")
+    sha256: Optional[str] = Field(None, description="SHA-256 哈希")
+    phash: Optional[str] = Field(None, description="感知哈希")
+    size: int = Field(..., description="文件大小（字节）")
+    mtime: Optional[datetime] = Field(None, description="修改时间")
+    width: Optional[int] = Field(None, description="图片宽度")
+    height: Optional[int] = Field(None, description="图片高度")
+    thumbnail_path: Optional[str] = Field(None, description="缩略图路径")
 
 
-class AuditEvent(Base):
-    """审计事件记录（只追加）"""
-    __tablename__ = "audit_event"
+class DuplicateGroup(BaseModel):
+    """重复组模型"""
 
-    id = Column(String(36), primary_key=True)
-    proposal_id = Column(String(36), ForeignKey("archive_proposal.id"), nullable=True)
-    event_type = Column(Enum(AuditEventType), nullable=False)
-    before_hash = Column(String(64), nullable=True)
-    after_hash = Column(String(64), nullable=True)
-    source_path = Column(Text, nullable=True)
-    target_path = Column(Text, nullable=True)
-    details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    id: Optional[str] = Field(None, description="组 ID")
+    scan_run_id: str = Field(..., description="所属扫描任务 ID")
+    kind: DuplicateKind = Field(..., description="重复类型")
+    representative_asset_id: str = Field(..., description="代表图片 ID")
+    distance: Optional[int] = Field(None, description="pHash 距离（近似重复）")
+    asset_ids: list[str] = Field(default_factory=list, description="组内资产 ID 列表")
 
 
-class DuplicateGroupMember(Base):
-    """重复组成员关系"""
-    __tablename__ = "duplicate_group_member"
+class OcrResult(BaseModel):
+    """OCR 结果模型"""
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    group_id = Column(String(36), ForeignKey("duplicate_group.id"), nullable=False)
-    asset_id = Column(String(36), ForeignKey("asset.id"), nullable=False)
+    id: Optional[str] = Field(None, description="结果 ID")
+    asset_id: str = Field(..., description="关联资产 ID")
+    engine: str = Field(..., description="OCR 引擎名称")
+    engine_version: str = Field(default="", description="引擎版本")
+    language: str = Field(..., description="识别语言")
+    text: str = Field(..., description="OCR 识别文本")
+    confidence: float = Field(default=0.0, description="置信度 (0-1)")
+    is_sensitive: bool = Field(default=False, description="是否包含敏感内容")
+    created_at: datetime = Field(default_factory=datetime.now, description="创建时间")
 
-    __table_args__ = (
-        UniqueConstraint("group_id", "asset_id", name="uq_group_asset"),
-    )
+
+class Extraction(BaseModel):
+    """提取实体模型"""
+
+    id: Optional[str] = Field(None, description="实体 ID")
+    asset_id: str = Field(..., description="关联资产 ID")
+    ocr_result_id: Optional[str] = Field(None, description="关联 OCR 结果 ID")
+    kind: str = Field(..., description="实体类型 (date/url/amount/action_phrase)")
+    value: str = Field(..., description="原始值")
+    value_masked: str = Field(..., description="掩码后的值")
+    evidence_span: str = Field(..., description="OCR 证据片段")
+    confidence: float = Field(default=0.0, description="置信度 (0-1)")
+    is_sensitive: bool = Field(default=False, description="是否敏感内容")
+    source: str = Field(default="rule", description="来源 (rule/model_suggestion)")
+    created_at: datetime = Field(default_factory=datetime.now, description="创建时间")
+
+
+class ArchiveProposal(BaseModel):
+    """归档建议模型"""
+
+    id: Optional[str] = Field(None, description="建议 ID")
+    asset_id: str = Field(..., description="关联资产 ID")
+    action: ProposalAction = Field(..., description="建议操作")
+    suggested_category: Optional[str] = Field(None, description="建议分类")
+    target_path: Optional[str] = Field(None, description="目标路径")
+    confidence: float = Field(default=0.0, description="置信度 (0-1)")
+    rationale: str = Field(default="", description="建议理由")
+    evidence_refs: list[str] = Field(default_factory=list, description="证据引用列表")
+    requires_approval: bool = Field(default=True, description="是否需要审批")
+    status: ProposalStatus = Field(default=ProposalStatus.PENDING, description="状态")
+    rejection_reason: Optional[str] = Field(None, description="拒绝理由")
+    created_at: datetime = Field(default_factory=datetime.now, description="创建时间")
+    updated_at: Optional[datetime] = Field(None, description="更新时间")
+
+
+class AuditEvent(BaseModel):
+    """审计事件模型"""
+
+    id: Optional[str] = Field(None, description="事件 ID")
+    proposal_id: str = Field(..., description="关联建议 ID")
+    event_type: AuditEventType = Field(..., description="事件类型")
+    asset_id: str = Field(..., description="关联资产 ID")
+    source_path: str = Field(..., description="源文件路径")
+    target_path: Optional[str] = Field(None, description="目标路径")
+    before_hash: Optional[str] = Field(None, description="操作前哈希")
+    after_hash: Optional[str] = Field(None, description="操作后哈希")
+    success: bool = Field(default=True, description="是否成功")
+    error_message: Optional[str] = Field(None, description="错误信息")
+    created_at: datetime = Field(default_factory=datetime.now, description="创建时间")

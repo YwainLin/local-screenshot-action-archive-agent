@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class WorkspaceConfig(BaseModel):
@@ -50,7 +50,7 @@ class WorkspaceConfig(BaseModel):
     def normalize_extensions(cls, v: list[str]) -> list[str]:
         return [ext if ext.startswith(".") else f".{ext}" for ext in v]
 
-    model_config = {"json_encoders": {Path: str}}
+    model_config = ConfigDict(json_encoders={Path: str})
 
 
 def create_workspace_config(

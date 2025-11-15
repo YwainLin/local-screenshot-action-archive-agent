@@ -27,7 +27,9 @@ class MigrationManager:
 
     def get_current_version(self) -> int:
         """获取当前数据库版本"""
-        result = self.db_manager.fetchone("PRAGMA user_version")
+        result = self.db_manager.fetchone(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+        )
         return result[0] if result else 0
 
     def get_applied_migrations(self) -> list[dict]:
@@ -44,9 +46,12 @@ class MigrationManager:
             return
 
         with self.db_manager.transaction():
-            self.db_manager.execute(sql)
+            # 按分号分割 SQL 语句，逐条执行
+            statements = [s.strip() for s in sql.split(";") if s.strip()]
+            for statement in statements:
+                self.db_manager.execute(statement)
             self.db_manager.execute(
-                "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)",
                 (version, name),
             )
             self.db_manager.execute(f"PRAGMA user_version={version}")
@@ -61,7 +66,7 @@ def get_initial_migration() -> tuple[int, str, str]:
         -- 扫描任务表
         CREATE TABLE IF NOT EXISTS scan_run (
             id TEXT PRIMARY KEY,
-            workspace_id TEXT NOT NULL,
+            workspace_id TEXT,
             root_path TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
             started_at TIMESTAMP,
@@ -163,7 +168,7 @@ def get_initial_migration() -> tuple[int, str, str]:
         CREATE TABLE IF NOT EXISTS audit_event (
             id TEXT PRIMARY KEY,
             proposal_id TEXT NOT NULL,
-            event_type TEXT NOT NULL CHECK (event_type IN ('copy', 'export', 'reject', 'error')),
+            event_type TEXT NOT NULL,
             asset_id TEXT NOT NULL,
             source_path TEXT NOT NULL,
             target_path TEXT,

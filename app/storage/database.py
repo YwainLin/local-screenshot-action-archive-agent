@@ -64,6 +64,9 @@ class DatabaseManager:
 
     def table_exists(self, table_name: str) -> bool:
         """检查表是否存在"""
+        # sqlite_master 是特殊表，直接返回 True
+        if table_name == "sqlite_master":
+            return True
         result = self.fetchone(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
             (table_name,),
