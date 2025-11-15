@@ -8,6 +8,7 @@
 - **图像去重**：SHA-256 完全重复 + pHash 近似重复检测
 - **本地 OCR**：使用 PaddleOCR 进行文字识别
 - **规则提取**：自动识别日期、链接、金额、行动词等
+- **LLM 增强**：支持 Ollama 本地模型或 OpenAI 兼容 API
 - **全文搜索**：基于 SQLite FTS5 的本地全文搜索
 - **归档建议**：生成待审批的归档计划，用户完全控制
 - **审计日志**：所有文件操作可追溯
@@ -103,14 +104,16 @@ local-screenshot-action-archive-agent/
 │   │   ├── index_store.py       # FTS 索引
 │   │   ├── proposal_builder.py  # 归档建议生成
 │   │   ├── file_operator.py     # 文件操作
-│   │   └── audit_service.py     # 审计服务
+│   │   ├── audit_service.py     # 审计服务
+│   │   └── llm_service.py       # LLM 服务
 │   ├── agent/            # Agent 编排逻辑
 │   │   ├── orchestrator.py      # 状态图编排
 │   │   └── graph_store.py       # Neo4j 图存储
 │   ├── storage/          # 数据库和配置管理
 │   │   ├── models.py     # 数据模型
 │   │   ├── database.py   # 数据库管理
-│   │   └── workspace_config.py  # 工作区配置
+│   │   ├── workspace_config.py  # 工作区配置
+│   │   └── llm_config.py        # LLM 配置
 │   └── templates/        # HTML 模板
 │       ├── scan_result.html     # 扫描结果页
 │       ├── search.html          # 搜索页
@@ -126,6 +129,8 @@ local-screenshot-action-archive-agent/
 
 ## 配置
 
+### 工作区配置
+
 工作区配置文件 `config.json` 示例：
 
 ```json
@@ -140,6 +145,44 @@ local-screenshot-action-archive-agent/
   "local_model_enabled": false
 }
 ```
+
+### LLM 配置
+
+支持两种 LLM 模式：
+
+#### 1. Ollama（本地，推荐）
+
+```bash
+# 安装 Ollama
+# https://ollama.com
+
+# 拉取模型
+ollama pull qwen2.5-vl:latest
+
+# 设置环境变量
+export LLM_PROVIDER=ollama
+export LLM_BASE_URL=http://localhost:11434
+export LLM_MODEL=qwen2.5-vl:latest
+```
+
+#### 2. OpenAI 兼容 API
+
+```bash
+# 设置环境变量
+export LLM_PROVIDER=openai
+export LLM_API_KEY=your_api_key_here
+export LLM_BASE_URL=https://api.openai.com
+export LLM_MODEL=gpt-4o
+```
+
+#### 环境变量说明
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `LLM_PROVIDER` | `ollama` | LLM 提供商（ollama/openai/custom） |
+| `LLM_API_KEY` | `None` | API Key（Ollama 不需要） |
+| `LLM_BASE_URL` | `http://localhost:11434` | API 基础 URL |
+| `LLM_MODEL` | `qwen2.5-vl:latest` | 模型名称 |
 
 ## 隐私说明
 

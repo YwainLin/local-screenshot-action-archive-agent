@@ -4,6 +4,8 @@ import enum
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ..services.llm_service import LLMService, get_llm_service
+
 
 class AgentState(str, enum.Enum):
     """Agent 状态"""
@@ -39,7 +41,8 @@ class WorkflowState:
 class AgentOrchestrator:
     """Agent 编排器（简化版 LangGraph 状态图）"""
 
-    def __init__(self) -> None:
+    def __init__(self, llm_service: Optional[LLMService] = None) -> None:
+        self.llm_service = llm_service or get_llm_service()
         self.state_transitions = {
             AgentState.IDLE: AgentState.INVENTORY,
             AgentState.INVENTORY: AgentState.DEDUPLICATE,
@@ -128,8 +131,16 @@ class AgentOrchestrator:
         return state
 
     async def _handle_retrieve_and_plan(self, state: WorkflowState) -> WorkflowState:
-        """处理检索与计划生成阶段"""
+        """处理检索与计划生成阶段（使用 LLM）"""
         state.current_state = AgentState.RETRIEVE_AND_PLAN
+
+        if self.llm_service.is_available:
+            state.metadata["llm_available"] = True
+            state.metadata["plan_strategy"] = "llm_enhanced"
+        else:
+            state.metadata["llm_available"] = False
+            state.metadata["plan_strategy"] = "rule_based"
+
         state.metadata["plan_generated"] = True
         return state
 
@@ -157,7 +168,29 @@ class AgentOrchestrator:
         state.metadata["audit_recorded"] = True
         return state
 
+    def analyze_with_llm(self, ocr_text: str, extractions: List[Dict]) -> Dict[str, Any]:
+        """使用 LLM 分析内容"""
+        if not self.llm_service.is_available:
+            return {
+                "title": "",
+                "category": "其他",
+                "summary": "",
+                "sensitivity": {"is_sensitive": False, "sensitivity_level": "low"},
+            }
 
-def get_orchestrator() -> AgentOrchestrator:
+        title = self.llm_service.generate_title(ocr_text)
+        category = self.llm_service.generate_category(ocr_text, extractions)
+        summary = self.llm_service.generate_summary(ocr_text)
+        sensitivity = self.llm_service.analyze_sensitivity(ocr_text)
+
+        return {
+            "title": title,
+            "category": category,
+            "summary": summary,
+            "sensitivity": sensitivity,
+        }
+
+
+def get_orchestrator(llm_service: Optional[LLMService] = None) -> AgentOrchestrator:
     """获取编排器实例"""
-    return AgentOrchestrator()
+    return AgentOrchestrator(llm_service)
