@@ -97,32 +97,41 @@ local-screenshot-action-archive-agent/
 │   │   └── audit.py      # 审计 API
 │   ├── services/         # 业务逻辑服务
 │   │   ├── scanner.py    # 目录扫描
-│   │   ├── image_fingerprint.py  # 图像指纹
-│   │   ├── duplicate_detector.py # 重复检测
-│   │   ├── ocr_service.py       # OCR 服务
-│   │   ├── extractor.py         # 规则提取
-│   │   ├── index_store.py       # FTS 索引
-│   │   ├── proposal_builder.py  # 归档建议生成
-│   │   ├── file_operator.py     # 文件操作
-│   │   ├── audit_service.py     # 审计服务
-│   │   └── llm_service.py       # LLM 服务
+│   │   ├── fingerprint.py          # SHA-256/pHash/dHash 指纹
+│   │   ├── image_fingerprint.py    # 图像指纹（Pillow）
+│   │   ├── deduplication.py        # 去重（Union-Find）
+│   │   ├── duplicate_detector.py   # 重复检测（ORM）
+│   │   ├── ocr.py                  # OCR 服务（抽象引擎）
+│   │   ├── ocr_service.py          # OCR 服务（PaddleOCR）
+│   │   ├── extractor.py            # 规则提取
+│   │   ├── search.py               # 关键词/日期搜索
+│   │   ├── index_store.py          # FTS 索引
+│   │   ├── proposal_builder.py     # 归档建议生成
+│   │   ├── approval.py             # 审批服务
+│   │   ├── file_operator.py        # 文件操作
+│   │   ├── audit_service.py        # 审计服务
+│   │   ├── scan_manager.py         # 扫描任务管理
+│   │   ├── workspace.py            # 工作区服务
+│   │   └── llm_service.py          # LLM 服务
 │   ├── agent/            # Agent 编排逻辑
-│   │   ├── orchestrator.py      # 状态图编排
-│   │   └── graph_store.py       # Neo4j 图存储
+│   │   ├── state.py              # Agent 状态模型
+│   │   ├── orchestrator.py       # 状态图编排
+│   │   └── graph_store.py        # Neo4j 图存储
 │   ├── storage/          # 数据库和配置管理
-│   │   ├── models.py     # 数据模型
-│   │   ├── database.py   # 数据库管理
-│   │   ├── workspace_config.py  # 工作区配置
-│   │   └── llm_config.py        # LLM 配置
+│   │   ├── models.py             # 数据模型（Pydantic）
+│   │   ├── database.py           # 数据库管理（raw SQL）
+│   │   ├── migrations.py         # 数据库迁移
+│   │   ├── workspace_config.py   # 工作区配置
+│   │   └── llm_config.py         # LLM 配置
 │   └── templates/        # HTML 模板
-│       ├── scan_result.html     # 扫描结果页
-│       ├── search.html          # 搜索页
-│       ├── proposals.html       # 归档审批页
-│       └── audit.html           # 审计日志页
+│       ├── scan_result.html      # 扫描结果页
+│       ├── search.html           # 搜索页
+│       ├── proposals.html        # 归档审批页
+│       └── audit.html            # 审计日志页
 ├── tests/
 │   ├── fixtures/         # 脱敏测试样例
-│   ├── unit/             # 单元测试
-│   └── integration/      # 集成测试
+│   ├── unit/             # 单元测试（146 个）
+│   └── integration/      # 集成测试（9 个）
 ├── docs/                 # 项目文档
 └── artifacts/            # 生成的产物
 ```
@@ -210,8 +219,14 @@ export LLM_MODEL=gpt-4o
 # 激活环境
 conda activate screenshot-agent
 
-# 运行测试
-pytest
+# 运行所有测试（155 个）
+pytest tests/ -v
+
+# 仅运行单元测试
+pytest tests/unit/ -v
+
+# 仅运行集成测试
+pytest tests/integration/ -v
 
 # 代码格式化
 black .
